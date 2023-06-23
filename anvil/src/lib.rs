@@ -162,12 +162,15 @@ pub async fn spawn(mut config: NodeConfig) -> (EthApi, NodeHandle) {
     let node_service =
         tokio::task::spawn(NodeService::new(pool, backend, miner, fee_history_service, filters));
 
+    let addrs = ["127.0.0.1".parse::<IpAddr>().unwrap(), "::1".parse().unwrap()]
+        .map(|addr| SocketAddr::new(addr, port));
+
     let host = config.host.unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
     let mut addr = SocketAddr::new(host, port);
 
     // configure the rpc server and use its actual local address
-    let server = server::serve(addr, api.clone(), server_config);
-    addr = server.local_addr();
+    let (addrs, server) = server::serve(&addrs, api.clone(), server_config);
+    addr = addrs[0];
 
     // spawn the server on a new task
     let serve = tokio::task::spawn(server.map_err(NodeError::from));

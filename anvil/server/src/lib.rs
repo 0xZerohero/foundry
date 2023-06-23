@@ -13,9 +13,10 @@ use axum::{
     routing::{post, IntoMakeService},
     Router, Server,
 };
-use hyper::server::conn::AddrIncoming;
+use hyper::server::accept::Accept;
 use serde::de::DeserializeOwned;
-use std::{fmt, net::SocketAddr};
+use std::{error::Error, fmt};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing::{error, trace};
 
@@ -33,19 +34,22 @@ pub use crate::pubsub::{PubSubContext, PubSubRpcHandler};
 pub use config::ServerConfig;
 
 /// Type alias for the configured axum server
-pub type AnvilServer = Server<AddrIncoming, IntoMakeService<Router>>;
+pub type AnvilServer<Acc> = Server<Acc, IntoMakeService<Router>>;
 
 /// Configures an [axum::Server] that handles RPC-Calls, both HTTP requests and requests via
 /// websocket
-pub fn serve_http_ws<Http, Ws>(
-    addr: SocketAddr,
+pub fn serve_http_ws<Http, Ws, Acc, IC, IE>(
+    incoming: Acc,
     config: ServerConfig,
     http: Http,
     ws: Ws,
-) -> AnvilServer
+) -> AnvilServer<Acc>
 where
     Http: RpcHandler,
     Ws: PubSubRpcHandler,
+    Acc: Accept<Conn = IC, Error = IE>,
+    IC: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    IE: Into<Box<dyn Error + Send + Sync>>,
 {
     let ServerConfig { allow_origin, no_cors } = config;
 
@@ -68,13 +72,21 @@ where
         )
     }
     .into_make_service();
-    Server::bind(&addr).serve(svc)
+
+    Server::builder(incoming).serve(svc)
 }
 
 /// Configures an [axum::Server] that handles RPC-Calls listing for POST on `/`
-pub fn serve_http<Http>(addr: SocketAddr, config: ServerConfig, http: Http) -> AnvilServer
+pub fn serve_http<Http, Acc, IC, IE>(
+    incoming: Acc,
+    config: ServerConfig,
+    http: Http,
+) -> AnvilServer<Acc>
 where
     Http: RpcHandler,
+    Acc: Accept<Conn = IC, Error = IE>,
+    IC: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    IE: Into<Box<dyn Error + Send + Sync>>,
 {
     let ServerConfig { allow_origin, no_cors } = config;
 
@@ -96,7 +108,7 @@ where
     }
     .into_make_service();
 
-    Server::bind(&addr).serve(svc)
+    Server::builder(incoming).serve(svc)
 }
 
 /// Helper trait that is used to execute ethereum rpc calls

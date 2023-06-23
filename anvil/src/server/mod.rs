@@ -3,7 +3,12 @@ use crate::EthApi;
 use anvil_server::{ipc::IpcEndpoint, AnvilServer, ServerConfig};
 use futures::StreamExt;
 use handler::{HttpEthRpcHandler, PubSubEthRpcHandler};
-use std::net::SocketAddr;
+use hyper::server::{accept::Accept, conn::AddrIncoming};
+use std::{
+    net::SocketAddr,
+    pin::Pin,
+    task::{Context, Poll},
+};
 use tokio::{io, task::JoinHandle};
 use tracing::trace;
 
@@ -12,10 +17,18 @@ mod handler;
 pub mod error;
 
 /// Configures an [axum::Server] that handles [EthApi] related JSON-RPC calls via HTTP and WS
-pub fn serve(addr: SocketAddr, api: EthApi, config: ServerConfig) -> AnvilServer {
+pub fn serve(
+    addrs: &[SocketAddr],
+    api: EthApi,
+    config: ServerConfig,
+) -> (Vec<SocketAddr>, AnvilServer<CombinedIncoming>) {
+    let combined_streams = CombinedIncoming::from_socket_addrs(addrs);
     let http = HttpEthRpcHandler::new(api.clone());
     let ws = PubSubEthRpcHandler::new(api);
-    anvil_server::serve_http_ws(addr, config, http, ws)
+    (
+        combined_streams.local_addrs(),
+        anvil_server::serve_http_ws(combined_streams, config, http, ws),
+    )
 }
 
 /// Launches an ipc server at the given path in a new task
@@ -47,4 +60,47 @@ pub fn try_spawn_ipc(
     });
 
     Ok(task)
+}
+
+/// Combines multiple AddrIncoming into single stream
+pub struct CombinedIncoming {
+    streams: Vec<AddrIncoming>,
+}
+
+impl Accept for CombinedIncoming {
+    type Conn = <AddrIncoming as Accept>::Conn;
+    type Error = <AddrIncoming as Accept>::Error;
+
+    fn poll_accept(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Self::Conn, Self::Error>>> {
+        for stream in &mut self.streams {
+            if let Poll::Ready(value) = Pin::new(stream).poll_accept(cx) {
+                return Poll::Ready(value)
+            }
+        }
+
+        Poll::Pending
+    }
+}
+
+impl CombinedIncoming {
+    fn from_socket_addrs(addrs: &[SocketAddr]) -> Self {
+        let streams: Vec<AddrIncoming> = addrs
+            .into_iter()
+            .map(|addr| {
+                AddrIncoming::bind(&addr).unwrap_or_else(|e| {
+                    panic!("error binding to {}: {}", addr, e);
+                })
+            })
+            .collect();
+
+        Self { streams }
+    }
+
+    /// Get the local addresses bound to the listeners.
+    pub fn local_addrs(&self) -> Vec<SocketAddr> {
+        self.streams.iter().map(|stream| stream.local_addr()).collect()
+    }
 }
